@@ -2,12 +2,14 @@
 <html>
 
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link href="dark.css" rel="stylesheet">
+    <meta charset="utf-8" />
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="viewport" content="user-scalable=no, initial-scale=1, maximum-scale=1, minimum-scale=1, width=device-width, height=device-height">
+    <link rel="manifest" href="manifest.json">
     <link rel="apple-touch-icon" href="icon.png">
+    <link rel="preload" href="audio-worklet.js" as="script">
+    <link href="dark.css" rel="stylesheet">
     <title>DS Player</title>
 </head>
 
@@ -15,6 +17,7 @@
     <style>
         html,
         body {
+            overflow-y: hidden;
             overflow-x: hidden;
             -webkit-user-select: none;
             user-select: none;
@@ -30,6 +33,8 @@
             width: 100vw;
             height: 100vh;
             font-family: 'Myriad Set Pro', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+
+
         }
 
         canvas {
@@ -56,6 +61,25 @@
             z-index: 2;
             touch-action: none;
         }
+
+        #menu {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 4;
+            overflow: hidden scroll;
+            background: rgba(0, 127, 255, 0.5);
+        }
+
+        #menu button {
+            background: transparent;
+        }
+        #menu button:active {
+            background: rgba(255, 255, 255, 0.5);
+        }
+
 
 
         a,
@@ -91,10 +115,13 @@
         <h1>DS Player</h1>
         <div id="loading">Loading...</div>
         <div id="loadrom" hidden>
-            <input id="rom" type="file">
+            <input id="rom" type="file" hidden>
+            <button style="width:calc(100% - 2em);margin: 1em;" onclick="$id('rom').click()">Choose File...</button>
         </div>
+        <hr>
         <a target="_blank" href="https://github.com/44670/desmume-wasm">https://github.com/44670/desmume-wasm</a>
-        <p>Ver. 20210913</p>
+        <p>Ver. 20211122 <a href="#" onclick="whatsNew()">What's new?</a></p>
+        <p><a href="#" onclick="uiSwitchTo('menu')">⚙ Settings...</a></p>
         <div id="ios-hint" hidden>
             Due to iOS Safari limitations, you may need to add this page to your home screen before you can save the
             game.
@@ -114,19 +141,94 @@
         <div class="vk-rect vk" data-k="start">+</div>
         <div class="vk-round vk" data-k="stick" id="vk-stick"></div>
     </div>
-    <div style="z-index: 2;position: absolute;top: 0px;" id="fps" hidden></div>
+    <div style="z-index: 2;position: absolute;bottom: 20px;" id="fps"></div>
     <div id="msg-layer" hidden>
         <p id="msg-text"></p>
     </div>
-    <canvas id="top" width="256" height="192"></canvas><br>
-    <canvas id="bottom" width="256" height="192"></canvas><br>
+    <div id="menu" hidden>
+        <button onclick="uiMenuBack()">❮ Back</button>
+        <hr>
+        <input type="checkbox" id="power-save">
+        <label for="power-save">Power-save mode</label><br>
+        <input type="checkbox" id="vk-enabled">
+        <label for="vk-enabled">Virtual keyboard</label><br>
+        <hr>
+        <div id="menu-savegame" hidden>
+            <input type="file" id="restore-file" onchange="uiSaveRestore()" hidden>
+            Save Data: <button onclick="uiSaveBackup()">↓ Export</button>|<button onclick="$id('restore-file').click()">↑ Import</button>
+            <hr>
+        </div>
+    </div>
+    <div id="player" hidden>
+        <canvas id="top" width="256" height="192"></canvas>
+        <canvas id="bottom" width="256" height="192"></canvas>
+    </div>
     <script src="localforage.js"></script>
-    <script src="build/nds.js"></script>
     <script>
 
+        var uiCurrentMode = 'welcome'
         var plugins = {}
         var body = document.getElementsByTagName("body")[0]
         var html = document.getElementsByTagName("html")[0]
+        var config = {
+            swapTopBottom: false,
+            swapTopBottomL: false,
+            powerSave: true,
+            micWhenR: true,
+            vkEnabled: true,
+        }
+
+        function loadConfig() {
+            var cfg = JSON.parse(window.localStorage['config'] || '{}')
+            for (var k in cfg) {
+                config[k] = cfg[k]
+            }
+            $id('power-save').checked = config.powerSave
+            $id('vk-enabled').checked = config.vkEnabled
+        }
+        loadConfig()
+
+        function uiSaveConfig() {
+            config.powerSave = !!($id('power-save').checked)
+            config.vkEnabled = !!($id('vk-enabled').checked)
+            window.localStorage['config'] = JSON.stringify(config)
+        }
+
+        
+        function uiMenuBack() {
+            uiSaveConfig()
+            if (emuIsGameLoaded) {
+                uiSwitchTo('player')
+            } else {
+                uiSwitchTo('welcome')
+            }
+        }
+
+        function uiSaveBackup() {
+            localforage.getItem('sav-' + gameID).then((data) => {
+                var blob = new Blob([data], { type: "application/binary" });
+                var link = document.createElement("a");
+                link.href = window.URL.createObjectURL(blob);
+                link.download = 'sav-' + gameID + '.dsv';
+                link.click();
+            })
+        }
+
+        async function uiSaveRestore() {
+            var file = $id('restore-file').files[0]
+            if (!file) {
+                return
+            }
+            if (file.size > 2.2 * 1024 * 1024) {
+                alert('Too large! It should not be a save file.')
+                return
+            }
+            var u8 = new Uint8Array(await file.arrayBuffer())
+            localforage.setItem('sav-' + gameID, u8).then(() => {
+                alert('Save file loaded.')
+                location.reload()
+            })
+        }
 
 
         window.onerror = function (msg, url, line, col, error) {
@@ -167,10 +269,12 @@
         for (var i = 0; i < emuKeyNames.length; i++) {
             keyNameToKeyId[emuKeyNames[i]] = i
         }
+        var isLandscape = false
 
         const emuKeyboradMapping = [39, 37, 40, 38, 16, 13, 90, 88, 65, 83, 81, 87, -1, 8]
         var emuGameID = 'unknown'
         var emuIsRunning = false
+        var emuIsGameLoaded = false
         var fps = 0
         var divFPS = $id('fps')
         var fileInput = $id('rom')
@@ -181,22 +285,19 @@
         var ctx2d = screenCanvas.map((v) => { return v.getContext('2d', { alpha: false }) })
 
         var audioContext
-        var scriptProcessor
-        var AUDIO_BLOCK_SIZE = 2048
-        var AUDIO_ORIG_SAMPLES_DESIRED = AUDIO_BLOCK_SIZE
         var audioBuffer
         var tmpAudioBuffer = new Int16Array(16384 * 2)
         var audioWorkletNode
 
         var frameCount = 0
         var prevCalcFPSTime = 0
-        var shouldDraw = false
         var touched = 0
         var touchX = 0
         var touchY = 0
         var prevSaveFlag = 0
         var lastTwoFrameTime = 10
         var fbSize
+
 
         function callPlugin(type, arg) {
             for (var k in plugins) {
@@ -215,18 +316,27 @@
         }
 
         function emuRunFrame() {
+            processGamepadInput()
             var keyMask = 0;
             for (var i = 0; i < 14; i++) {
                 if (emuKeyState[i]) {
                     keyMask |= 1 << i
                 }
             }
-            shouldDraw = true
-            Module._runFrame(shouldDraw ? 1 : 0, keyMask, touched, touchX, touchY)
-            if (shouldDraw) {
-                ctx2d[0].putImageData(FB[0], 0, 0)
-                ctx2d[1].putImageData(FB[1], 0, 0)
+            var mic = emuKeyState[11]
+            if (mic) {
+                console.log('mic')
+                keyMask |= 1 << 14
             }
+
+
+            if (config.powerSave) {
+                Module._runFrame(0, keyMask, touched, touchX, touchY)
+            }
+            Module._runFrame(1, keyMask, touched, touchX, touchY)
+
+            ctx2d[0].putImageData(FB[0], 0, 0)
+            ctx2d[1].putImageData(FB[1], 0, 0)
             if (audioWorkletNode) {
                 try {
                     var samplesRead = Module._fillAudioBuffer(4096)
@@ -245,15 +355,15 @@
                 prevCalcFPSTime = time
                 divFPS.innerText = 'fps:' + ('' + fps).substring(0, 5)
             }
-            if (frameCount % 120 == 0) {
+            if (frameCount % 60 == 0) {
                 checkSaveGame()
             }
         }
 
         function wasmReady() {
+            Module._setSampleRate(47860)
             $id('loading').hidden = true
             $id('loadrom').hidden = false
-            //setInterval(emuRunFrame, 1000/120)
         }
 
 
@@ -313,8 +423,9 @@
             var ptrAudio = Module._getSymbol(6)
             audioBuffer = new Int16Array(Module.HEAPU8.buffer).subarray(ptrAudio / 2, ptrAudio / 2 + 16384 * 2)
             console.log('Start!!!')
+            emuIsGameLoaded = true
             emuIsRunning = true
-            uiSwitchToPlayer()
+            uiSwitchTo('player')
             callPlugin('loaded', gameID)
         }
 
@@ -336,11 +447,10 @@
         }
 
 
-        function adjustVKLayout() {
-            var isLandscape = window.innerWidth > window.innerHeight
+        function uiAdjustVKLayout() {
             var baseSize = window.innerWidth * 0.14
             var fontSize = baseSize * 0.7
-            var offTop = fbSize[0][1] + fbSize[1][1]
+            var offTop = Math.min(fbSize[0][1] + fbSize[1][1], window.innerHeight - Math.ceil(baseSize * 3.62))
             var offLeft = 0
             var abxyWidth = baseSize * 3
             var abxyHeight = baseSize * 3
@@ -364,8 +474,8 @@
             vkMap['x'].style = makeVKStyle(offTop, offLeft + abxyWidth / 2 - vkw / 2, vkw, vkh, fontSize)
             vkMap['y'].style = makeVKStyle(offTop + abxyHeight / 2 - vkh / 2, offLeft, vkw, vkh, fontSize)
 
-            vkw = baseSize * 1.5
-            vkh = baseSize * 1.5
+            vkw = baseSize * 1.0
+            vkh = baseSize * 1.0
             offLeft = 0
             $id('vk-stick').style = makeVKStyle(offTop + abxyHeight / 2 - vkh / 2, offLeft + abxyHeight / 2 - vkw / 2, vkw, vkh, fontSize)
             vkStickPos = [offTop + abxyHeight / 2, offLeft + abxyHeight / 2, vkw, vkh, fontSize]
@@ -377,7 +487,8 @@
             vkMap['start'].style = makeVKStyle(offTop + abxyHeight - vkh, window.innerWidth / 2 + vkw * 0.5, vkw, vkh, fontSize)
         }
 
-        function uiAdjustSize() {
+        function uiUpdateLayout() {
+            isLandscape = window.innerWidth > window.innerHeight
             var maxWidth = window.innerWidth
             var maxHeight = window.innerHeight / 2
             var w = maxWidth
@@ -395,23 +506,51 @@
                 screenCanvas[i].style = 'left:' + left + 'px;top:' + top + "px;width:" + w + "px;height:" + h + "px;"
                 top += h
             }
-            adjustVKLayout()
+            uiAdjustVKLayout()
         }
 
-        function uiSwitchToPlayer() {
-            for (var i = 0; i < 14; i++) {
-                emuKeyState[i] = false
+
+        function uiSwitchTo(mode) {
+            if (mode == uiCurrentMode) {
+                return
             }
-            body.style = 'touch-action: none;'
-            html.style = 'position: fixed;overflow:hidden;touch-action: none;'
+            uiCurrentMode = mode
             $id('welcome').hidden = true
-            $id('vk-layer').hidden = false
-            uiAdjustSize()
+            $id('vk-layer').hidden = true
+            $id('menu').hidden = true
+            $id('player').hidden = true
+            body.style = ''
+            html.style = ''
+            emuIsRunning = false
+
+            if (mode == 'player') {
+                body.style = 'touch-action: none;'
+                html.style = 'position: fixed;overflow:hidden;touch-action: none;'
+                for (var i = 0; i < 14; i++) {
+                    emuKeyState[i] = false
+                }
+                if (config.vkEnabled) {
+                    $id('vk-layer').hidden = false
+                }
+                uiUpdateLayout()
+                if (emuIsGameLoaded) {
+                    emuIsRunning = true
+                }
+                $id('player').hidden = false
+            }
+            if (mode == 'menu') {
+                $id('player').hidden = false
+                $id('menu').hidden = false
+                $id('menu-savegame').hidden = emuIsGameLoaded ? false : true
+            }
+            if (mode == 'welcome') {
+                $id('welcome').hidden = false
+            }
+
         }
 
-        function uiSwitchToMenu() {
 
-        }
+
 
         fileInput.onchange = async () => {
             tryInitSound()
@@ -432,30 +571,9 @@
             await tryLoadROM(file)
         }
 
-        function processAudio(event) {
-            var outputBuffer = event.outputBuffer
-            var audioData0 = outputBuffer.getChannelData(0)
-            var audioData1 = outputBuffer.getChannelData(1)
-            if ((!emuIsRunning) || (fps <= 10)) {
-                for (var i = 0; i < AUDIO_BLOCK_SIZE; i++) {
-                    audioData0[i] = 0
-                    audioData1[i] = 0
-                }
-                return
-            }
-            var samplesRead = Module._fillAudioBuffer(AUDIO_BLOCK_SIZE)
-            for (var i = 0; i < samplesRead; i++) {
-                audioData0[i] = audioBuffer[i * 2] / 32768.0
-                audioData1[i] = audioBuffer[i * 2 + 1] / 32768.0
-            }
-            for (var i = samplesRead; i < AUDIO_BLOCK_SIZE; i++) {
-                audioData0[i] = 0
-                audioData1[i] = 0
-            }
-        }
 
         // must be called in user gesture
-        async function tryInitSound() {
+        function tryInitSound() {
             try {
                 if (audioContext) {
                     if (audioContext.state != 'running') {
@@ -466,16 +584,11 @@
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 0.0001, sampleRate: 48000 });
                 if (!audioContext.audioWorklet) {
                     alert('AudioWorklet is not supported in your browser...')
-                    /*
-                    console.warn('audio worklet not supported, falling back to script processor...')
-                    // fall back to the scriptprocessor
-                    scriptProcessor = audioContext.createScriptProcessor(AUDIO_BLOCK_SIZE, 0, 2)
-                    scriptProcessor.onaudioprocess = processAudio
-                    scriptProcessor.connect(audioContext.destination)*/
                 } else {
-                    await audioContext.audioWorklet.addModule("/audio-worklet.js")
-                    audioWorkletNode = new AudioWorkletNode(audioContext, "my-worklet", { outputChannelCount: [2] })
-                    audioWorkletNode.connect(audioContext.destination)
+                    audioContext.audioWorklet.addModule("audio-worklet.js").then(() => {
+                        audioWorkletNode = new AudioWorkletNode(audioContext, "my-worklet", { outputChannelCount: [2] })
+                        audioWorkletNode.connect(audioContext.destination)
+                    })
                 }
 
                 audioContext.resume()
@@ -485,15 +598,24 @@
             }
         }
 
+        var prevRunFrameTime = performance.now()
         function emuLoop() {
             window.requestAnimationFrame(emuLoop)
+
             if (emuIsRunning) {
+                if (config.powerSave) {
+                    if (performance.now() - prevRunFrameTime < 32) {
+                        return
+                    }
+                }
+                prevRunFrameTime = performance.now()
                 emuRunFrame()
             }
         }
         emuLoop()
 
-        var stickTouchID = false
+        var stickTouchID = null
+        var tpadTouchID = null
 
         function isPointInRect(x, y, r) {
             if ((x >= r.x) && (x < r.x + r.width)) {
@@ -502,6 +624,16 @@
                 }
             }
             return false
+        }
+
+        function clamp01(a) {
+            if (a < 0) {
+                return 0
+            }
+            if (a > 1) {
+                return 1
+            }
+            return a
         }
 
         function handleTouch(event) {
@@ -523,7 +655,10 @@
             var stickH = vkStickPos[3]
 
             var stickPressed = false
-            var stickDeadZone = stickW * 0.2
+            var stickDeadZone = stickW * 0.4
+
+            var nextStickTouchID = null
+            var nextTpadTouchID = null
 
             var tsRect = screenCanvas[1].getBoundingClientRect()
 
@@ -538,15 +673,16 @@
                 var t = event.touches[i];
                 var tid = t.identifier
                 var dom = document.elementFromPoint(t.clientX, t.clientY)
-                var k = dom.getAttribute('data-k')
-                if ((tid === stickTouchID) || (dom == vkMap['stick'])) {
+                var k = dom ? dom.getAttribute('data-k') : null
+
+                if ((tid === stickTouchID) || ((dom == vkMap['stick']) && (tid != tpadTouchID))) {
                     stickPressed = true
 
                     vkState['stick'][1] = 1
                     var sx = t.clientX
                     var sy = t.clientY
                     if (sx < stickX - stickDeadZone) {
-                        emuKeyState[1] = true 
+                        emuKeyState[1] = true
                     }
                     if (sx > stickX + stickDeadZone) {
                         emuKeyState[0] = true
@@ -564,7 +700,14 @@
                     stickX = sx
                     stickY = sy
                     needUpdateStick = true
-                    stickTouchID = tid
+                    nextStickTouchID = tid
+                    continue
+                }
+                if ((tid === tpadTouchID) || (isPointInRect(t.clientX, t.clientY, tsRect) && (!k))) {
+                    isDown = true
+                    x = clamp01((t.clientX - tsRect.x) / tsRect.width) * 256
+                    y = clamp01((t.clientY - tsRect.y) / tsRect.height) * 192
+                    nextTpadTouchID = tid
                     continue
                 }
                 if (k) {
@@ -572,14 +715,6 @@
                     vkState[k][1] = 1
                     continue
                 }
-
-
-                if (isPointInRect(t.clientX, t.clientY, tsRect)) {
-                    isDown = true
-                    x = (t.clientX - tsRect.x) / tsRect.width * 256
-                    y = (t.clientY - tsRect.y) / tsRect.height * 192
-                }
-
             }
 
             touched = isDown ? 1 : 0;
@@ -592,10 +727,12 @@
                     vkState[k][0] = vkState[k][1]
                     if (vkState[k][1]) {
                         dom.classList.add('vk-touched')
+                        if (k == 'menu') {
+                            uiSwitchTo('menu')
+                        }
                     } else {
                         dom.classList.remove('vk-touched')
                         if (k == "stick") {
-                            stickTouchID = false
                             needUpdateStick = true
                         }
                     }
@@ -615,6 +752,9 @@
             if (needUpdateStick) {
                 vkMap['stick'].style = makeVKStyle(stickY - stickW / 2, stickX - stickW / 2, stickW, stickH, vkStickPos[4])
             }
+
+            stickTouchID = nextStickTouchID
+            tpadTouchID = nextTpadTouchID
         }
         ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'touchenter', 'touchleave'].forEach((val) => {
             window.addEventListener(val, handleTouch)
@@ -635,7 +775,7 @@
 
             e.preventDefault()
             e.stopPropagation()
-            
+
             var isDown = (e.buttons != 0) && (isPointInRect(e.clientX, e.clientY, r))
             var x = (e.clientX - r.x) / r.width * 256
             var y = (e.clientY - r.y) / r.height * 192
@@ -646,7 +786,7 @@
         }
 
         window.onresize = window.onorientationchange = () => {
-            uiAdjustSize()
+            uiUpdateLayout()
         }
         function convertKeyCode(keyCode) {
             for (var i = 0; i < 14; i++) {
@@ -666,10 +806,76 @@
             if (k >= 0) {
                 emuKeyState[k] = isDown
             }
+            if (e.keyCode == 27) {
+                uiSwitchTo('menu')
+            }
         }
 
+        var currentConnectedGamepad = -1
+        var gamePadKeyMap = {
+            a: 1,
+            b: 0,
+            x: 3,
+            y: 2,
+            l: 4,
+            r: 5,
+            'select': 9,
+            'start': 16,
+            'up': 12,
+            'down': 13,
+            'left': 14,
+            'right': 15
+        }
 
+        window.addEventListener("gamepadconnected", function (e) {
+            console.log("Gamepad connected at index %d: %s. %d buttons, %d axes.",
+                e.gamepad.index, e.gamepad.id,
+                e.gamepad.buttons.length, e.gamepad.axes.length);
+            showMsg('Gamepad connected.')
+            currentConnectedGamepad = e.gamepad.index
+
+        });
+
+        function processGamepadInput() {
+            if (currentConnectedGamepad < 0) {
+                return
+            }
+            var gamepad = navigator.getGamepads()[currentConnectedGamepad]
+            if (!gamepad) {
+                showMsg('Gamepad disconnected.')
+                currentConnectedGamepad = -1
+                return
+            }
+            for (var i = 0; i < emuKeyState.length; i++) {
+                emuKeyState[i] = false
+            }
+            for (var k in gamePadKeyMap) {
+                if (gamepad.buttons[gamePadKeyMap[k]].pressed) {
+                    emuKeyState[keyNameToKeyId[k]] = true
+                }
+            }
+            if (gamepad.axes[0] < -0.5) {
+                emuKeyState[keyNameToKeyId['left']] = true
+            }
+            if (gamepad.axes[0] > 0.5) {
+                emuKeyState[keyNameToKeyId['right']] = true
+            }
+            if (gamepad.axes[1] < -0.5) {
+                emuKeyState[keyNameToKeyId['up']] = true
+            }
+            if (gamepad.axes[1] > 0.5) {
+                emuKeyState[keyNameToKeyId['down']] = true
+            }
+        }
+
+        function whatsNew() {
+            alert(`
+1. Added setting option to hide the virtual keyboard.
+`)
+        }
     </script>
+    <script src="build/nds.js"></script>
+    <script src="sw-loader.js"></script>
 </body>
 
 </html>
